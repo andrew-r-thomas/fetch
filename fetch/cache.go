@@ -21,8 +21,10 @@ type OpenResp struct {
 	err error
 }
 
-func NewCacheFS() CacheFS {
+func NewCacheFS(capacity int, origin Origin, root string) CacheFS {
 	sender := make(chan Open, 10)
+	cache := NewCache(capacity, sender, origin, root)
+	go cache.Start()
 	return CacheFS{sender: sender}
 }
 
@@ -69,6 +71,19 @@ func (cf *CacheFile) Close() error {
 	return nil
 }
 
+func NewCache(capacity int, recv <-chan Open, origin Origin, root string) Cache {
+	return Cache{
+		recv:     recv,
+		capacity: capacity,
+		clock:    0,
+		fMap:     make(map[string]CacheFileMeta),
+		pq:       PQ{},
+		origin:   origin,
+		root:     root,
+		used:     0,
+	}
+}
+
 func (c *Cache) Start() {
 	for open := range c.recv {
 		if cfm, ok := c.fMap[open.name]; ok {
@@ -109,6 +124,7 @@ func (c *Cache) Start() {
 						log.Fatalf("error removing file: %v\n", err)
 					}
 					c.used -= cf.size
+					c.clock = cf.qi.priority
 					delete(c.fMap, top.name)
 				} else {
 					// save the popped so that you can add them back to the queue

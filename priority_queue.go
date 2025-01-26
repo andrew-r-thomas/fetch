@@ -4,7 +4,8 @@ type PQ []*PQItem
 type PQItem struct {
 	qId      int
 	priority int
-	name     string
+	freq     int
+	size     int
 }
 
 func (pq PQ) Len() int           { return len(pq) }

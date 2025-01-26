@@ -9,42 +9,81 @@ import (
 	"sync"
 )
 
-type CacheFS struct {
-	sender chan<- Open
-}
-type Open struct {
-	name string
-	recv chan<- OpenResp
-}
-type OpenResp struct {
-	f   fs.File
-	err error
-}
-
-func NewCacheFS(capacity int, origin Origin, root string) CacheFS {
-	sender := make(chan Open, 10)
-	cache := NewCache(capacity, sender, origin, root)
-	go cache.Start()
-	return CacheFS{sender: sender}
-}
-
-func (c *CacheFS) Open(name string) (fs.File, error) {
-	respChan := make(chan OpenResp, 1)
-	c.sender <- Open{name: name, recv: respChan}
-	resp := <-respChan
-	return resp.f, resp.err
-}
-
+// PERF: ain't no way this phatty lock is the right way to do this
 type Cache struct {
-	recv     <-chan Open
-	fMap     map[string]CacheFileMeta
-	pq       PQ
-	clock    int
-	origin   Origin
+	lock     sync.RWMutex
+	m        map[string]CacheLine
+	accesses chan *PQItem
+
 	capacity int
 	used     int
-	root     string
+	clock    int
+	pqueue   PQ
+
+	root string
 }
+type CacheLine struct {
+	f  *os.File
+	qI *PQItem
+}
+
+func (c *Cache) Get(path string) (*os.File, bool) {
+	c.lock.RLock()
+	cl, ok := c.m[path]
+	if ok {
+		select {
+		case c.accesses <- cl.qI:
+		default:
+			// accesses was full, time to flush
+			// PERF: track how much this happens, this is a big perf hit
+			c.lock.RUnlock()
+			c.lock.Lock()
+			for qi := range c.accesses {
+				qi.freq += 1
+				qi.priority = c.clock + (qi.freq / qi.size)
+				heap.Fix(&c.pqueue, qi.qId)
+			}
+			c.lock.Unlock()
+			c.lock.RLock()
+			c.accesses <- cl.qI
+		}
+	}
+	return cl.f, ok
+}
+func (c *Cache) Return(ref **os.File) {
+	*ref = nil
+	c.lock.RUnlock()
+}
+func (c *Cache) Put(path string, size int, r io.Reader) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// fix up queue with accesses
+	for qi := range c.accesses {
+		qi.freq += 1
+		qi.priority = c.clock + (qi.freq / qi.size)
+		heap.Fix(&c.pqueue, qi.qId)
+	}
+
+	// evict until there is room
+	for c.used+size > c.capacity {
+
+	}
+
+	// add to map, queue, and make file etc
+	f, err := os.Create(c.root + "/" + path)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, r)
+	if err != nil {
+		return err
+	}
+	c.m[path] = f
+
+	return nil
+}
+
 type CacheFileMeta struct {
 	cf   *CacheFile
 	qi   *PQItem
